@@ -205,3 +205,32 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+data/
+*.wav
+*.mp3
+*.flac
+
+# Training outputs
+checkpoints/
+logs/
+results/
+*.pt
+*.pth
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.ipynb_checkpoints/
+
+# Environment
+.env
+audio-training-venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
