@@ -1,0 +1,17 @@
+{
+  "api_keys": {
+    "openai": "your-openai-api-key-here",
+    "anthropic": "your-anthropic-api-key-here",
+    "huggingface": "your-huggingface-api-key-here"
+  },
+  "default_models": {
+    "openai": "gpt-4",
+    "anthropic": "claude-3-sonnet-20240229",
+    "local": "mistral-7b"
+  },
+  "prompting": {
+    "temperature": 0.3,
+    "max_tokens": 500,
+    "include_context": true
+  }
+}
