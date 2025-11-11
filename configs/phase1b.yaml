@@ -1,0 +1,46 @@
+# Phase 1B: Parametric EQ + Black-box Residual (Full Hybrid)
+# Tests if neural residual improves over EQ-only
+
+model:
+  phase: "1B"
+  
+  encoder:
+    latent_dim: 512
+  
+  parametric_decoder:
+    num_bands: 5
+    hidden_dim: 256
+    dropout: 0.2
+  
+  residual_decoder:
+    base_channels: 32
+
+training:
+  batch_size: 8
+  learning_rate: 0.0001
+  epochs: 100  # More epochs for full model
+  
+  loss_weights:
+    spectral: 1.0
+    perceptual: 0.1
+    loudness: 0.01
+    param_reg: 0.001
+
+data:
+  data_dir: "data"
+  segment_length: 5.0
+  sample_rate: 44100
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  augment: true
+  num_workers: 4
+  
+  # CRITICAL: LUFS normalization
+  # Set to true initially to force model to learn EQ/dynamics, not just volume
+  # Both pre/post mastering pairs normalized to same LUFS level
+  normalize_lufs: true    # Recommended for initial training
+  target_lufs: -14.0      # Streaming standard (-14 LUFS)
+
+checkpoint:
+  save_every: 10

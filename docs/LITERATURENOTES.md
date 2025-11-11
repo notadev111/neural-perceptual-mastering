@@ -1,1 +1,0 @@
-add notes from papers, things we've used.. what are the biquads 
