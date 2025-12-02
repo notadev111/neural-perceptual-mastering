@@ -27,50 +27,56 @@ class MultiScaleSTFTLoss(nn.Module):
         self.win_lengths = win_lengths
         
     def stft(self, x, fft_size, hop_size, win_length):
-        """Compute STFT magnitude."""
+        """Compute STFT magnitude for stereo audio."""
         # Window
         window = torch.hann_window(win_length).to(x.device)
-        
-        # Compute STFT
-        stft_result = torch.stft(
-            x.squeeze(1),
-            n_fft=fft_size,
-            hop_length=hop_size,
-            win_length=win_length,
-            window=window,
-            return_complex=True
-        )
-        
-        # Magnitude
-        mag = torch.abs(stft_result)
+
+        # Process each channel separately for stereo
+        batch_size, channels, samples = x.shape
+
+        # Compute STFT for each channel
+        mags = []
+        for ch in range(channels):
+            stft_result = torch.stft(
+                x[:, ch, :],  # [batch, samples]
+                n_fft=fft_size,
+                hop_length=hop_size,
+                win_length=win_length,
+                window=window,
+                return_complex=True
+            )
+            mags.append(torch.abs(stft_result))
+
+        # Average magnitude across channels
+        mag = torch.stack(mags, dim=0).mean(dim=0)
         return mag
     
     def forward(self, pred, target):
         """
         Args:
-            pred: [batch, 1, samples]
-            target: [batch, 1, samples]
+            pred: [batch, channels, samples] - stereo (2 channels)
+            target: [batch, channels, samples] - stereo (2 channels)
         """
         total_loss = 0.0
-        
+
         for fft_size, hop_size, win_length in zip(
             self.fft_sizes, self.hop_sizes, self.win_lengths
         ):
             # Compute STFT magnitudes
             pred_mag = self.stft(pred, fft_size, hop_size, win_length)
             target_mag = self.stft(target, fft_size, hop_size, win_length)
-            
+
             # Spectral convergence loss (L2 on magnitudes)
             sc_loss = torch.norm(target_mag - pred_mag, p='fro') / torch.norm(target_mag, p='fro')
-            
+
             # Log magnitude loss (perceptual)
             log_loss = F.l1_loss(
                 torch.log(pred_mag + 1e-7),
                 torch.log(target_mag + 1e-7)
             )
-            
+
             total_loss += sc_loss + log_loss
-        
+
         return total_loss / len(self.fft_sizes)
 
 
@@ -141,15 +147,15 @@ class AWeightedLoss(nn.Module):
     def forward(self, pred, target):
         """
         Compute L1 loss on A-weighted signals.
-        
+
         Args:
-            pred: [batch, 1, samples]
-            target: [batch, 1, samples]
+            pred: [batch, channels, samples] - stereo (2 channels)
+            target: [batch, channels, samples] - stereo (2 channels)
         """
         # Apply A-weighting to both signals
         pred_weighted = self._apply_filter(pred)
         target_weighted = self._apply_filter(target)
-        
+
         # L1 loss (MAE) on weighted signals
         return F.l1_loss(pred_weighted, target_weighted)
 
@@ -170,31 +176,31 @@ class LUFSLoss(nn.Module):
     def compute_rms_db(self, audio):
         """
         Compute RMS level in dB (simplified loudness).
-        
+
         Args:
-            audio: [batch, 1, samples]
+            audio: [batch, channels, samples] - stereo (2 channels)
         Returns:
             rms_db: [batch]
         """
-        # RMS over time dimension
-        rms = torch.sqrt(torch.mean(audio ** 2, dim=-1))
-        
+        # RMS over time and channel dimensions (average across stereo channels)
+        rms = torch.sqrt(torch.mean(audio ** 2, dim=(1, 2)))
+
         # Convert to dB
         rms_db = 20 * torch.log10(rms + 1e-7)
-        
-        return rms_db.squeeze(1)
+
+        return rms_db
     
     def forward(self, pred, target):
         """
         Match loudness between prediction and target.
-        
+
         Args:
-            pred: [batch, 1, samples]
-            target: [batch, 1, samples]
+            pred: [batch, channels, samples] - stereo (2 channels)
+            target: [batch, channels, samples] - stereo (2 channels)
         """
         pred_lufs = self.compute_rms_db(pred)
         target_lufs = self.compute_rms_db(target)
-        
+
         # L1 loss on loudness
         return F.l1_loss(pred_lufs, target_lufs)
 
@@ -253,40 +259,52 @@ class MelSpectralLoss(nn.Module):
     def forward(self, pred, target):
         """
         Compute L1 loss on mel spectrograms.
-        
+
         Args:
-            pred: [batch, 1, samples]
-            target: [batch, 1, samples]
+            pred: [batch, channels, samples] - stereo (2 channels)
+            target: [batch, channels, samples] - stereo (2 channels)
         """
         # Compute STFT
         window = torch.hann_window(self.n_fft).to(pred.device)
-        
-        pred_stft = torch.stft(
-            pred.squeeze(1),
-            n_fft=self.n_fft,
-            return_complex=True,
-            window=window
-        )
-        target_stft = torch.stft(
-            target.squeeze(1),
-            n_fft=self.n_fft,
-            return_complex=True,
-            window=window
-        )
-        
-        # Magnitude
-        pred_mag = torch.abs(pred_stft)
-        target_mag = torch.abs(target_stft)
-        
-        # Apply mel filterbank
-        mel_fb = self.mel_fb.to(pred.device)
-        pred_mel = torch.matmul(mel_fb, pred_mag)
-        target_mel = torch.matmul(mel_fb, target_mag)
-        
+
+        # Process each channel and average
+        pred_mels = []
+        target_mels = []
+
+        for ch in range(pred.shape[1]):
+            pred_stft = torch.stft(
+                pred[:, ch, :],
+                n_fft=self.n_fft,
+                return_complex=True,
+                window=window
+            )
+            target_stft = torch.stft(
+                target[:, ch, :],
+                n_fft=self.n_fft,
+                return_complex=True,
+                window=window
+            )
+
+            # Magnitude
+            pred_mag = torch.abs(pred_stft)
+            target_mag = torch.abs(target_stft)
+
+            # Apply mel filterbank
+            mel_fb = self.mel_fb.to(pred.device)
+            pred_mel = torch.matmul(mel_fb, pred_mag)
+            target_mel = torch.matmul(mel_fb, target_mag)
+
+            pred_mels.append(pred_mel)
+            target_mels.append(target_mel)
+
+        # Average across channels
+        pred_mel_avg = torch.stack(pred_mels, dim=0).mean(dim=0)
+        target_mel_avg = torch.stack(target_mels, dim=0).mean(dim=0)
+
         # Log mel spectrogram
-        pred_log_mel = torch.log(pred_mel + 1e-7)
-        target_log_mel = torch.log(target_mel + 1e-7)
-        
+        pred_log_mel = torch.log(pred_mel_avg + 1e-7)
+        target_log_mel = torch.log(target_mel_avg + 1e-7)
+
         return F.l1_loss(pred_log_mel, target_log_mel)
 
 
@@ -320,12 +338,12 @@ class CombinedLoss(nn.Module):
     def forward(self, pred, target, eq_params=None):
         """
         Compute weighted combination of losses.
-        
+
         Args:
-            pred: [batch, 1, samples]
-            target: [batch, 1, samples]
+            pred: [batch, channels, samples] - stereo (2 channels)
+            target: [batch, channels, samples] - stereo (2 channels)
             eq_params: tuple of (freqs, gains, q_factors) or None
-        
+
         Returns:
             total_loss: scalar
             loss_dict: dictionary of individual losses (for logging)
