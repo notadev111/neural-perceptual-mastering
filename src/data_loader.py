@@ -30,7 +30,7 @@ class MasteringDataset(Dataset):
             song2.wav
             ...
     
-    Each file should be 44.1kHz stereo (will be converted to mono).
+    Each file should be 44.1kHz stereo.
     """
     def __init__(self, data_dir, segment_length=5.0, sample_rate=44100,
                  augment=False, subset='train', normalize_lufs=True, target_lufs=-14.0):
@@ -80,14 +80,38 @@ class MasteringDataset(Dataset):
     def _load_audio(self):
         """Load all audio pairs into memory."""
         print(f"Loading audio files for {self.subset}...")
-        
+
         for um_file, m_file in zip(self.unmastered_files, self.mastered_files):
-            # Load unmastered
-            um_audio, um_sr = torchaudio.load(um_file)
+            # Load unmastered with fallback to scipy
+            try:
+                um_audio, um_sr = torchaudio.load(str(um_file))
+            except Exception:
+                from scipy.io import wavfile
+                import numpy as np
+                um_sr, um_data = wavfile.read(str(um_file))
+                um_audio = torch.from_numpy(um_data.T).float()
+                # Normalize if int format
+                if um_data.dtype == np.int16:
+                    um_audio = um_audio / 32768.0
+                elif um_data.dtype == np.int32:
+                    um_audio = um_audio / 2147483648.0
+
             um_audio = self._preprocess(um_audio, um_sr)
-            
-            # Load mastered
-            m_audio, m_sr = torchaudio.load(m_file)
+
+            # Load mastered with fallback to scipy
+            try:
+                m_audio, m_sr = torchaudio.load(str(m_file))
+            except Exception:
+                from scipy.io import wavfile
+                import numpy as np
+                m_sr, m_data = wavfile.read(str(m_file))
+                m_audio = torch.from_numpy(m_data.T).float()
+                # Normalize if int format
+                if m_data.dtype == np.int16:
+                    m_audio = m_audio / 32768.0
+                elif m_data.dtype == np.int32:
+                    m_audio = m_audio / 2147483648.0
+
             m_audio = self._preprocess(m_audio, m_sr)
             
             # Ensure same length
@@ -102,32 +126,33 @@ class MasteringDataset(Dataset):
     def _compute_lufs(self, audio):
         """
         Compute approximate LUFS (simplified ITU-R BS.1770).
-        
+
         Args:
-            audio: [1, samples] tensor
+            audio: [channels, samples] tensor (mono or stereo)
         Returns:
             lufs: float (dB)
         """
         # RMS over entire signal (simplified LUFS)
+        # Average across channels for stereo
         rms = torch.sqrt(torch.mean(audio ** 2))
-        
+
         # Convert to dB (with small epsilon to avoid log(0))
         lufs_db = 20 * torch.log10(rms + 1e-7)
-        
+
         return lufs_db.item()
     
     def _normalize_lufs(self, audio, target_lufs=-14.0):
         """
         Normalize audio to target LUFS level.
-        
+
         This ensures pre/post mastering pairs are at the same loudness,
         forcing the model to learn EQ/compression/etc. rather than just volume.
-        
+
         Args:
-            audio: [1, samples] tensor
+            audio: [channels, samples] tensor (mono or stereo)
             target_lufs: Target LUFS in dB (default: -14.0 for streaming)
         Returns:
-            normalized_audio: [1, samples] tensor
+            normalized_audio: [channels, samples] tensor
         """
         # Compute current LUFS
         current_lufs = self._compute_lufs(audio)
@@ -150,7 +175,7 @@ class MasteringDataset(Dataset):
         """
         Preprocess audio:
         - Resample to target sample rate
-        - Convert to mono
+        - Keep stereo (2 channels)
         - LUFS normalize (if enabled)
         - Peak normalize (if LUFS not enabled)
         """
@@ -158,11 +183,13 @@ class MasteringDataset(Dataset):
         if sr != self.sample_rate:
             resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
             audio = resampler(audio)
-        
-        # Convert to mono
-        if audio.shape[0] > 1:
-            audio = torch.mean(audio, dim=0, keepdim=True)
-        
+
+        # Ensure stereo (convert mono to stereo if needed)
+        if audio.shape[0] == 1:
+            audio = audio.repeat(2, 1)  # Duplicate mono to stereo
+        elif audio.shape[0] > 2:
+            audio = audio[:2, :]  # Take first 2 channels if more than stereo
+
         # LUFS normalization (recommended for training)
         if hasattr(self, 'normalize_lufs') and self.normalize_lufs:
             audio = self._normalize_lufs(audio, target_lufs=self.target_lufs)
@@ -171,16 +198,16 @@ class MasteringDataset(Dataset):
             max_val = torch.max(torch.abs(audio))
             if max_val > 0:
                 audio = audio / max_val
-        
+
         return audio
     
     def _augment(self, unmastered, mastered):
         """
         Apply data augmentation (random gain, polarity flip).
-        
+
         Args:
-            unmastered: [1, samples]
-            mastered: [1, samples]
+            unmastered: [2, samples] stereo
+            mastered: [2, samples] stereo
         """
         # Random gain (-3dB to +3dB)
         if random.random() < 0.5:
@@ -212,12 +239,12 @@ class MasteringDataset(Dataset):
     def __getitem__(self, idx):
         """
         Get a random segment from a random song.
-        
+
         For efficiency, we sample randomly rather than deterministically.
-        
+
         Returns:
-            unmastered: [1, segment_samples]
-            mastered: [1, segment_samples]
+            unmastered: [2, segment_samples] stereo
+            mastered: [2, segment_samples] stereo
         """
         # Randomly select a song
         song_idx = random.randint(0, len(self.audio_pairs) - 1)
@@ -324,68 +351,42 @@ def get_dataloaders(config):
     return train_loader, val_loader, test_loader
 
 
-def create_dummy_dataset(output_dir, num_songs=3, duration=30.0, sample_rate=44100):
-    """
-    Create a dummy dataset for testing.
-    
-    Args:
-        output_dir: Where to save dummy files
-        num_songs: Number of song pairs to create
-        duration: Duration of each song in seconds
-        sample_rate: Sample rate
-    """
-    import numpy as np
-    
-    output_dir = Path(output_dir)
-    (output_dir / 'unmastered').mkdir(parents=True, exist_ok=True)
-    (output_dir / 'mastered').mkdir(parents=True, exist_ok=True)
-    
-    print(f"Creating {num_songs} dummy song pairs...")
-    
-    for i in range(num_songs):
-        # Generate random audio
-        samples = int(duration * sample_rate)
-        
-        # Unmastered: raw audio with less processing
-        unmastered = np.random.randn(2, samples).astype(np.float32) * 0.3
-        
-        # Mastered: simulate compression + EQ boost
-        mastered = unmastered * 1.5  # Louder
-        mastered = np.tanh(mastered * 2) / 2  # Compression
-        
-        # Save
-        um_path = output_dir / 'unmastered' / f'song{i+1:03d}.wav'
-        m_path = output_dir / 'mastered' / f'song{i+1:03d}.wav'
-        
-        torchaudio.save(str(um_path), torch.tensor(unmastered), sample_rate)
-        torchaudio.save(str(m_path), torch.tensor(mastered), sample_rate)
-    
-    print(f"Dummy dataset created at {output_dir}")
+# Dummy dataset function removed - using real data only
 
 
 if __name__ == '__main__':
-    # Test dataset creation
-    print("Creating dummy dataset for testing...")
-    create_dummy_dataset('data', num_songs=3, duration=30.0)
-    
-    # Test dataloader
-    print("\nTesting dataloader...")
-    config = {
-        'data': {
-            'data_dir': 'data',
-            'segment_length': 5.0,
-            'sample_rate': 44100,
-            'augment': True,
-            'num_workers': 0
-        },
-        'training': {
-            'batch_size': 2
+    import os
+
+    # Test with REAL data (your 185 segments)
+    real_data_dir = r"C:\Users\danie\Documents\!ELEC0030 Project\neural-perceptual-master training\processed\train"
+
+    if os.path.exists(real_data_dir):
+        print("Testing dataloader with REAL data (185 segments)...")
+        config = {
+            'data': {
+                'data_dir': real_data_dir,
+                'segment_length': 5.0,
+                'sample_rate': 44100,
+                'augment': True,
+                'num_workers': 0,
+                'normalize_lufs': True,
+                'target_lufs': -14.0
+            },
+            'training': {
+                'batch_size': 4
+            }
         }
-    }
-    
-    train_loader, val_loader, test_loader = get_dataloaders(config)
-    
-    # Get one batch
-    unmastered, mastered = next(iter(train_loader))
-    print(f"Batch shapes: {unmastered.shape}, {mastered.shape}")
-    print("Dataloader test successful!")
+
+        train_loader, val_loader, test_loader = get_dataloaders(config)
+
+        # Get one batch and verify shapes
+        print("\nLoading one batch...")
+        unmastered, mastered = next(iter(train_loader))
+        print(f"[OK] Batch shapes: unmastered={unmastered.shape}, mastered={mastered.shape}")
+        print(f"[OK] Channels: {unmastered.shape[1]} (stereo)")
+        print(f"[OK] Samples per segment: {unmastered.shape[2]}")
+        print(f"[OK] Batch size: {unmastered.shape[0]}")
+        print("\n[SUCCESS] Dataloader test passed! Ready for training on UCL GPU.")
+    else:
+        print(f"Real data not found at {real_data_dir}")
+        print("Run scripts/preprocess_data.py first to create the dataset.")

@@ -23,15 +23,15 @@ import math
 class AudioEncoder(nn.Module):
     """
     TCN (Temporal Convolutional Network) encoder.
-    
+
     Extracts latent representation from raw audio.
     Uses strided convolutions + dilated TCN blocks for long-range dependencies.
-    
+
     Based on Comunità et al. 2025 - TCNs for audio processing.
     """
-    def __init__(self, latent_dim=512, input_channels=1):
+    def __init__(self, latent_dim=512, input_channels=2):  # Changed to 2 for stereo
         super().__init__()
-        
+
         # Initial strided convolution (downsampling)
         self.stem = nn.Sequential(
             nn.Conv1d(input_channels, 64, kernel_size=15, stride=4, padding=7),
@@ -60,7 +60,7 @@ class AudioEncoder(nn.Module):
     def forward(self, audio):
         """
         Args:
-            audio: [batch, 1, samples]
+            audio: [batch, 2, samples] - stereo
         Returns:
             z: [batch, latent_dim]
         """
@@ -120,40 +120,56 @@ class SimpleBiquadEQ(nn.Module):
         
     def forward(self, audio, center_freqs, gains, q_factors):
         """
-        Apply biquad EQ filters.
-        
+        Apply biquad EQ filters to stereo audio.
+
         Args:
-            audio: [batch, 1, samples]
+            audio: [batch, 2, samples] - stereo
             center_freqs: [batch, num_bands] - frequencies in Hz
             gains: [batch, num_bands] - gains in dB
             q_factors: [batch, num_bands] - Q factors
-        
+
         Returns:
-            filtered: [batch, 1, samples]
+            filtered: [batch, 2, samples] - stereo
         """
-        batch_size, _, samples = audio.shape
+        batch_size, channels, samples = audio.shape
         num_bands = center_freqs.shape[1]
-        
+
         output = audio.clone()
-        
-        # Apply each band sequentially
+
+        # Apply each band sequentially (same EQ to both channels)
         for band_idx in range(num_bands):
             for batch_idx in range(batch_size):
                 freq = center_freqs[batch_idx, band_idx]
                 gain = gains[batch_idx, band_idx]
                 q = q_factors[batch_idx, band_idx]
-                
-                # Create biquad filter
-                eq_filter = torchaudio.transforms.BandBiquad(
-                    sample_rate=self.sample_rate,
-                    central_freq=freq.item(),
-                    Q=q.item(),
-                    gain=gain.item()
-                ).to(audio.device)
-                
-                # Apply to this batch element
-                output[batch_idx] = eq_filter(output[batch_idx])
-        
+
+                # Apply biquad peaking filter using torchaudio.functional
+                # Compute biquad coefficients for peaking filter
+                import torch
+                import math
+
+                # Convert parameters
+                w0 = 2 * math.pi * freq.item() / self.sample_rate
+                alpha = math.sin(w0) / (2 * q.item())
+                A = 10 ** (gain.item() / 40)  # sqrt of gain in linear scale
+
+                # Peaking EQ coefficients
+                b0 = 1 + alpha * A
+                b1 = -2 * math.cos(w0)
+                b2 = 1 - alpha * A
+                a0 = 1 + alpha / A
+                a1 = -2 * math.cos(w0)
+                a2 = 1 - alpha / A
+
+                # Normalize
+                b0, b1, b2, a1, a2 = b0/a0, b1/a0, b2/a0, a1/a0, a2/a0
+
+                # Apply biquad filter to both channels
+                output[batch_idx] = torchaudio.functional.biquad(
+                    output[batch_idx],
+                    b0, b1, b2, 1.0, a1, a2
+                )
+
         return output
 
 
@@ -193,10 +209,10 @@ class ParametricDecoder(nn.Module):
         """
         Args:
             z: [batch, latent_dim]
-            audio: [batch, 1, samples] - input audio
-        
+            audio: [batch, 2, samples] - input stereo audio
+
         Returns:
-            eq_audio: [batch, 1, samples] - EQ'd audio
+            eq_audio: [batch, 2, samples] - EQ'd stereo audio
             eq_params: tuple of (freqs, gains, q_factors)
         """
         # Predict parameters
@@ -261,10 +277,10 @@ class AdaptiveParametricDecoder(nn.Module):
         """
         Args:
             z: [batch, latent_dim]
-            audio: [batch, 1, samples]
-        
+            audio: [batch, 2, samples] - stereo
+
         Returns:
-            eq_audio: [batch, 1, samples]
+            eq_audio: [batch, 2, samples] - stereo
             params: tuple of (freqs, gains_gated, q_factors, band_weights)
         """
         # Predict band activation weights
@@ -289,40 +305,40 @@ class AdaptiveParametricDecoder(nn.Module):
 class ResidualDecoder(nn.Module):
     """
     Black-box residual decoder using Wave-U-Net.
-    
+
     Learns non-linear corrections that can't be captured by EQ.
     Uses FiLM conditioning on latent code.
     """
     def __init__(self, latent_dim=512, base_channels=32):
         super().__init__()
-        
-        # Downsampling path
-        self.down1 = WaveUNetBlock(1, base_channels, latent_dim)
+
+        # Downsampling path (starts with 2 channels for stereo)
+        self.down1 = WaveUNetBlock(2, base_channels, latent_dim)  # Changed to 2
         self.down2 = WaveUNetBlock(base_channels, base_channels * 2, latent_dim)
         self.down3 = WaveUNetBlock(base_channels * 2, base_channels * 4, latent_dim)
-        
+
         # Bottleneck
         self.bottleneck = WaveUNetBlock(base_channels * 4, base_channels * 8, latent_dim)
-        
+
         # Upsampling path with skip connections
-        self.up3 = WaveUNetBlock(base_channels * 8 + base_channels * 4, 
+        self.up3 = WaveUNetBlock(base_channels * 8 + base_channels * 4,
                                   base_channels * 4, latent_dim)
         self.up2 = WaveUNetBlock(base_channels * 4 + base_channels * 2,
                                   base_channels * 2, latent_dim)
         self.up1 = WaveUNetBlock(base_channels * 2 + base_channels,
                                   base_channels, latent_dim)
-        
-        # Output projection
-        self.output = nn.Conv1d(base_channels, 1, kernel_size=1)
+
+        # Output projection (outputs 2 channels for stereo)
+        self.output = nn.Conv1d(base_channels, 2, kernel_size=1)  # Changed to 2
         
     def forward(self, z, audio):
         """
         Args:
             z: [batch, latent_dim]
-            audio: [batch, 1, samples] - input audio (for skip connection)
-        
+            audio: [batch, 2, samples] - input stereo audio (for skip connection)
+
         Returns:
-            residual: [batch, 1, samples] - residual correction
+            residual: [batch, 2, samples] - residual correction (stereo)
         """
         # Downsampling
         d1 = self.down1(audio, z)
@@ -421,22 +437,22 @@ class MasteringModel_Phase1A(nn.Module):
     def forward(self, audio):
         """
         Args:
-            audio: [batch, 1, samples]
-        
+            audio: [batch, 2, samples] - stereo
+
         Returns:
-            output: [batch, 1, samples]
+            output: [batch, 2, samples] - stereo
             params: dict of extracted parameters
         """
         z = self.encoder(audio)
         output, eq_params = self.parametric_decoder(z, audio)
-        
+
         params = {
             'latent': z,
             'eq_frequencies': eq_params[0],
             'eq_gains': eq_params[1],
             'eq_q_factors': eq_params[2]
         }
-        
+
         return output, params
 
 
@@ -465,30 +481,30 @@ class MasteringModel_Phase1B(nn.Module):
     def forward(self, audio):
         """
         Args:
-            audio: [batch, 1, samples]
-        
+            audio: [batch, 2, samples] - stereo
+
         Returns:
-            output: [batch, 1, samples]
+            output: [batch, 2, samples] - stereo
             params: dict of extracted parameters
         """
         z = self.encoder(audio)
-        
+
         # Parametric path
         eq_out, eq_params = self.parametric_decoder(z, audio)
-        
+
         # Residual path
         residual_out = self.residual_decoder(z, audio)
-        
+
         # Combine
         output = eq_out + residual_out
-        
+
         params = {
             'latent': z,
             'eq_frequencies': eq_params[0],
             'eq_gains': eq_params[1],
             'eq_q_factors': eq_params[2]
         }
-        
+
         return output, params
 
 
@@ -517,23 +533,23 @@ class MasteringModel_Phase1C(nn.Module):
     def forward(self, audio):
         """
         Args:
-            audio: [batch, 1, samples]
-        
+            audio: [batch, 2, samples] - stereo
+
         Returns:
-            output: [batch, 1, samples]
+            output: [batch, 2, samples] - stereo
             params: dict of extracted parameters
         """
         z = self.encoder(audio)
-        
+
         # Adaptive parametric path
         eq_out, eq_params = self.parametric_decoder(z, audio)
-        
+
         # Residual path
         residual_out = self.residual_decoder(z, audio)
-        
+
         # Combine
         output = eq_out + residual_out
-        
+
         params = {
             'latent': z,
             'eq_frequencies': eq_params[0],
@@ -541,5 +557,5 @@ class MasteringModel_Phase1C(nn.Module):
             'eq_q_factors': eq_params[2],
             'band_weights': eq_params[3]  # Soft selection weights
         }
-        
+
         return output, params
