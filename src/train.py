@@ -163,9 +163,10 @@ def validate(model, val_loader, criterion, device, epoch, writer, use_wandb=True
 
         # Log audio samples every 5 epochs
         if log_audio and sample_output is not None and epoch % 5 == 0:
-            log_dict['audio/unmastered'] = wandb.Audio(sample_unmastered.numpy(), sample_rate=44100, caption="Unmastered")
-            log_dict['audio/target'] = wandb.Audio(sample_mastered.numpy(), sample_rate=44100, caption="Target Mastered")
-            log_dict['audio/predicted'] = wandb.Audio(sample_output.numpy(), sample_rate=44100, caption="Model Output")
+            # Transpose from [channels, samples] to [samples, channels] for wandb
+            log_dict['audio/unmastered'] = wandb.Audio(sample_unmastered.numpy().T, sample_rate=44100, caption="Unmastered")
+            log_dict['audio/target'] = wandb.Audio(sample_mastered.numpy().T, sample_rate=44100, caption="Target Mastered")
+            log_dict['audio/predicted'] = wandb.Audio(sample_output.numpy().T, sample_rate=44100, caption="Model Output")
 
         wandb.log(log_dict)
 
