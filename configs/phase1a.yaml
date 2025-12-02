@@ -26,7 +26,7 @@ training:
 data:
   segment_length: 5.0
   sample_rate: 44100
-  data_dir: "C:/Users/danie/Documents/!ELEC0030 Project/neural-perceptual-master training/processed"
+  data_dir: "C:/Users/danie/Documents/!ELEC0030 Project/neural-perceptual-master training/processed/train"
   train_split: 0.8
   val_split: 0.1
   test_split: 0.1
