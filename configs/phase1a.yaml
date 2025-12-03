@@ -19,7 +19,7 @@ training:
   
   loss_weights:
     spectral: 1.0
-    perceptual: 0.1
+    perceptual: 0.0  # Disabled - A-weighting filter causes NaN
     loudness: 0.01
     param_reg: 0.001
 
