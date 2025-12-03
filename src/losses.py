@@ -83,81 +83,129 @@ class MultiScaleSTFTLoss(nn.Module):
 class AWeightedLoss(nn.Module):
     """
     A-weighted perceptual loss function.
-    
+
     Based on ISO 226 A-weighting curve which models human ear sensitivity.
     Emphasizes 2-5kHz range where hearing is most sensitive.
-    
+
+    Uses frequency-domain weighting (more stable than time-domain IIR filter).
+
     References:
-    - Wright & Välimäki (2016): "Perceptual Audio Evaluation"
     - ISO 226:2003 standard for equal-loudness contours
+    - A-weighting: https://en.wikipedia.org/wiki/A-weighting
     """
-    def __init__(self, sample_rate=44100):
+    def __init__(self, sample_rate=44100, n_fft=2048):
         super().__init__()
         self.sample_rate = sample_rate
-        
-        # Create A-weighting filter coefficients
-        b, a = self._create_a_weighting_filter(sample_rate)
-        
-        # Store as buffers (not parameters - won't be trained)
-        self.register_buffer('filter_b', torch.tensor(b, dtype=torch.float32))
-        self.register_buffer('filter_a', torch.tensor(a, dtype=torch.float32))
-        
-    def _create_a_weighting_filter(self, sr):
+        self.n_fft = n_fft
+
+        # Create A-weighting curve in frequency domain
+        a_weights = self._create_a_weighting_curve(sample_rate, n_fft)
+        self.register_buffer('a_weights', a_weights)
+
+    def _create_a_weighting_curve(self, sr, n_fft):
         """
-        Design A-weighting filter using scipy.
-        Approximates ISO 226 A-weighting curve with IIR filter.
+        Create A-weighting curve in frequency domain.
+
+        A-weighting formula from ISO 226:
+        A(f) = 20*log10(Ra(f)) where
+        Ra(f) = (12194^2 * f^4) / ((f^2 + 20.6^2) * sqrt((f^2 + 107.7^2)(f^2 + 737.9^2)) * (f^2 + 12194^2))
         """
-        # Design bandpass filter emphasizing 2-5kHz
-        # A-weighting has +3dB peak around 2.5kHz
-        b, a = signal.iirfilter(
-            4,  # 4th order
-            [20, 20000],  # Full audible range
-            btype='band',
-            ftype='butter',
-            fs=sr
-        )
-        
-        return b, a
-    
-    def _apply_filter(self, audio):
-        """
-        Apply IIR filter to audio using difference equation.
-        
-        Args:
-            audio: [batch, 1, samples]
-        Returns:
-            filtered: [batch, 1, samples]
-        """
-        batch_size, channels, samples = audio.shape
-        
-        # Move to numpy for scipy filtering (could optimize with torch_dct)
-        audio_np = audio.detach().cpu().numpy()
-        
-        filtered = np.zeros_like(audio_np)
-        for b in range(batch_size):
-            for c in range(channels):
-                filtered[b, c] = signal.lfilter(
-                    self.filter_b.cpu().numpy(),
-                    self.filter_a.cpu().numpy(),
-                    audio_np[b, c]
-                )
-        
-        return torch.tensor(filtered, dtype=audio.dtype, device=audio.device)
-    
+        # Frequency bins
+        freqs = np.fft.rfftfreq(n_fft, 1.0/sr)
+
+        # A-weighting formula (ISO 226 standard)
+        f = freqs + 1e-10  # Avoid division by zero at DC
+
+        # Constants
+        c1 = 20.6**2
+        c2 = 107.7**2
+        c3 = 737.9**2
+        c4 = 12194.0**2
+
+        # A-weighting transfer function
+        numerator = c4 * f**4
+        denominator = (f**2 + c1) * np.sqrt((f**2 + c2) * (f**2 + c3)) * (f**2 + c4)
+
+        # Convert to dB
+        a_weight_db = 20 * np.log10(numerator / (denominator + 1e-10))
+
+        # Normalize to 0dB at 1kHz
+        a_weight_db = a_weight_db - a_weight_db[np.argmin(np.abs(freqs - 1000))]
+
+        # Convert dB to linear scale
+        a_weight_linear = 10 ** (a_weight_db / 20.0)
+
+        return torch.tensor(a_weight_linear, dtype=torch.float32)
+
     def forward(self, pred, target):
         """
-        Compute L1 loss on A-weighted signals.
+        Compute L1 loss on A-weighted signals using frequency-domain weighting.
 
         Args:
             pred: [batch, channels, samples] - stereo (2 channels)
             target: [batch, channels, samples] - stereo (2 channels)
         """
-        # Apply A-weighting to both signals
-        pred_weighted = self._apply_filter(pred)
-        target_weighted = self._apply_filter(target)
+        batch_size, channels, samples = pred.shape
+
+        # Window for STFT
+        window = torch.hann_window(self.n_fft).to(pred.device)
+
+        # Process each channel
+        pred_weighted_list = []
+        target_weighted_list = []
+
+        for ch in range(channels):
+            # Compute STFT
+            pred_stft = torch.stft(
+                pred[:, ch, :],
+                n_fft=self.n_fft,
+                hop_length=self.n_fft // 4,
+                win_length=self.n_fft,
+                window=window,
+                return_complex=True
+            )
+            target_stft = torch.stft(
+                target[:, ch, :],
+                n_fft=self.n_fft,
+                hop_length=self.n_fft // 4,
+                win_length=self.n_fft,
+                window=window,
+                return_complex=True
+            )
+
+            # Apply A-weighting in frequency domain
+            # a_weights shape: [freq_bins], stft shape: [batch, freq_bins, time_frames]
+            a_weights = self.a_weights.to(pred.device).unsqueeze(0).unsqueeze(-1)  # [1, freq_bins, 1]
+            pred_stft_weighted = pred_stft * a_weights
+            target_stft_weighted = target_stft * a_weights
+
+            # Convert back to time domain
+            pred_weighted = torch.istft(
+                pred_stft_weighted,
+                n_fft=self.n_fft,
+                hop_length=self.n_fft // 4,
+                win_length=self.n_fft,
+                window=window,
+                length=samples
+            )
+            target_weighted = torch.istft(
+                target_stft_weighted,
+                n_fft=self.n_fft,
+                hop_length=self.n_fft // 4,
+                win_length=self.n_fft,
+                window=window,
+                length=samples
+            )
+
+            pred_weighted_list.append(pred_weighted)
+            target_weighted_list.append(target_weighted)
+
+        # Stack channels back
+        pred_weighted_audio = torch.stack(pred_weighted_list, dim=1)
+        target_weighted_audio = torch.stack(target_weighted_list, dim=1)
 
         # L1 loss (MAE) on weighted signals
-        return F.l1_loss(pred_weighted, target_weighted)
+        return F.l1_loss(pred_weighted_audio, target_weighted_audio)
 
 
 class LUFSLoss(nn.Module):
