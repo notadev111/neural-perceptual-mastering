@@ -416,22 +416,26 @@ class WaveUNetBlock(nn.Module):
 class MasteringModel_Phase1A(nn.Module):
     """
     Phase 1A: Baseline parametric EQ only.
-    
+
     Pure interpretable white-box model.
     Tests if differentiable EQ alone is sufficient.
     """
     def __init__(self, config):
         super().__init__()
-        
+
         latent_dim = config['model']['encoder']['latent_dim']
         num_bands = config['model']['parametric_decoder']['num_bands']
         sample_rate = config['data']['sample_rate']
-        
+        hidden_dim = config['model']['parametric_decoder']['hidden_dim']
+        dropout = config['model']['parametric_decoder']['dropout']
+
         self.encoder = AudioEncoder(latent_dim=latent_dim)
         self.parametric_decoder = ParametricDecoder(
             latent_dim=latent_dim,
             num_bands=num_bands,
-            sample_rate=sample_rate
+            sample_rate=sample_rate,
+            hidden_dim=hidden_dim,
+            dropout=dropout
         )
     
     def forward(self, audio):
