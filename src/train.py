@@ -261,7 +261,8 @@ def main():
     
     # Optimizer
     lr = config['training']['learning_rate']
-    optimizer = optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.999))
+    weight_decay = config['training'].get('weight_decay', 0.0)  # L2 regularization
+    optimizer = optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=weight_decay)
     
     # Learning rate scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(

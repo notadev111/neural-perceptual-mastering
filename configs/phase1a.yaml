@@ -3,24 +3,25 @@
 
 model:
   phase: "1A"
-  
+
   encoder:
-    latent_dim: 512
-  
+    latent_dim: 256  # Reduced from 512 (smaller dataset)
+
   parametric_decoder:
-    num_bands: 5 
-    hidden_dim: 256
-    dropout: 0.2
+    num_bands: 5
+    hidden_dim: 128  # Reduced from 256
+    dropout: 0.3     # Increased from 0.2 (more regularization)
 
 training:
   batch_size: 8
   learning_rate: 0.0001
-  epochs: 50  
-  
+  epochs: 50
+  weight_decay: 0.01  # L2 regularization for small dataset
+
   loss_weights:
     spectral: 1.0
     perceptual: 0.1  # Re-enabled with fixed ISO 226 frequency-domain weighting
-    loudness: 0.01
+    loudness: 0.05   # Increased from 0.01 (val loudness was high)
     param_reg: 0.001
 
 data:
