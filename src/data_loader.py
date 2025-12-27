@@ -33,7 +33,8 @@ class MasteringDataset(Dataset):
     Each file should be 44.1kHz stereo.
     """
     def __init__(self, data_dir, segment_length=5.0, sample_rate=44100,
-                 augment=False, subset='train', normalize_lufs=True, target_lufs=-14.0):
+                 augment=False, subset='train', normalize_lufs=True, target_lufs=-14.0,
+                 train_split=0.8, val_split=0.1, test_split=0.1):
         """
         Args:
             data_dir: Path to data directory
@@ -44,6 +45,9 @@ class MasteringDataset(Dataset):
             normalize_lufs: If True, normalize both pre/post to same LUFS
                            This forces model to learn EQ/dynamics, not just volume
             target_lufs: Target LUFS level in dB (default: -14.0 for streaming)
+            train_split: Fraction of data for training (default: 0.8)
+            val_split: Fraction of data for validation (default: 0.1)
+            test_split: Fraction of data for testing (default: 0.1)
         """
         self.data_dir = Path(data_dir)
         self.segment_length = segment_length
@@ -53,24 +57,41 @@ class MasteringDataset(Dataset):
         self.subset = subset
         self.normalize_lufs = normalize_lufs
         self.target_lufs = target_lufs
-        
+
         # Find all audio files
-        self.unmastered_files = sorted(
+        all_unmastered = sorted(
             (self.data_dir / 'unmastered').glob('*.wav')
         )
-        self.mastered_files = sorted(
+        all_mastered = sorted(
             (self.data_dir / 'mastered').glob('*.wav')
         )
-        
+
         # Verify pairs match
-        assert len(self.unmastered_files) == len(self.mastered_files), \
+        assert len(all_unmastered) == len(all_mastered), \
             "Mismatch between unmastered and mastered files"
-        
-        for um_file, m_file in zip(self.unmastered_files, self.mastered_files):
+
+        for um_file, m_file in zip(all_unmastered, all_mastered):
             assert um_file.stem == m_file.stem, \
                 f"File pair mismatch: {um_file.stem} != {m_file.stem}"
-        
-        print(f"Found {len(self.unmastered_files)} audio pairs for {subset}")
+
+        # CRITICAL FIX: Split data by subset
+        total_files = len(all_unmastered)
+        train_end = int(total_files * train_split)
+        val_end = train_end + int(total_files * val_split)
+
+        if subset == 'train':
+            self.unmastered_files = all_unmastered[:train_end]
+            self.mastered_files = all_mastered[:train_end]
+        elif subset == 'val':
+            self.unmastered_files = all_unmastered[train_end:val_end]
+            self.mastered_files = all_mastered[train_end:val_end]
+        elif subset == 'test':
+            self.unmastered_files = all_unmastered[val_end:]
+            self.mastered_files = all_mastered[val_end:]
+        else:
+            raise ValueError(f"Unknown subset: {subset}")
+
+        print(f"Found {len(self.unmastered_files)} audio pairs for {subset} (from {total_files} total)")
         
         # Load all audio into memory (if dataset is small)
         # For large datasets, load on-the-fly instead
@@ -291,8 +312,13 @@ def get_dataloaders(config):
     # LUFS normalization settings
     normalize_lufs = config['data'].get('normalize_lufs', True)  # Default: True
     target_lufs = config['data'].get('target_lufs', -14.0)       # Default: -14 LUFS
-    
-    # Create datasets
+
+    # CRITICAL FIX: Get split ratios from config
+    train_split = config['data'].get('train_split', 0.8)
+    val_split = config['data'].get('val_split', 0.1)
+    test_split = config['data'].get('test_split', 0.1)
+
+    # Create datasets with proper splits
     train_dataset = MasteringDataset(
         data_dir=data_dir,
         segment_length=segment_length,
@@ -300,9 +326,12 @@ def get_dataloaders(config):
         augment=config['data']['augment'],
         subset='train',
         normalize_lufs=normalize_lufs,
-        target_lufs=target_lufs
+        target_lufs=target_lufs,
+        train_split=train_split,
+        val_split=val_split,
+        test_split=test_split
     )
-    
+
     val_dataset = MasteringDataset(
         data_dir=data_dir,
         segment_length=segment_length,
@@ -310,9 +339,12 @@ def get_dataloaders(config):
         augment=False,
         subset='val',
         normalize_lufs=normalize_lufs,
-        target_lufs=target_lufs
+        target_lufs=target_lufs,
+        train_split=train_split,
+        val_split=val_split,
+        test_split=test_split
     )
-    
+
     test_dataset = MasteringDataset(
         data_dir=data_dir,
         segment_length=segment_length,
@@ -320,7 +352,10 @@ def get_dataloaders(config):
         augment=False,
         subset='test',
         normalize_lufs=normalize_lufs,
-        target_lufs=target_lufs
+        target_lufs=target_lufs,
+        train_split=train_split,
+        val_split=val_split,
+        test_split=test_split
     )
     
     # Create dataloaders
