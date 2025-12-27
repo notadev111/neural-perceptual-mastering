@@ -16,7 +16,7 @@ model:
     base_channels: 32
 
 training:
-  batch_size: 8
+  batch_size: 4  # REDUCED from 8 due to 8x longer sequences (stride=2 encoder fix)
   learning_rate: 0.0001
   epochs: 100
   

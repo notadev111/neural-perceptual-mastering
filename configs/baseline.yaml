@@ -4,7 +4,7 @@ model:
   num_eq_bands: 5
   
 training:
-  batch_size: 16
+  batch_size: 4  # REDUCED from 16 due to 8x longer sequences (stride=2 encoder fix)
   learning_rate: 0.0001
   epochs: 100
   

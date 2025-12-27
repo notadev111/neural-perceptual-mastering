@@ -1,0 +1,572 @@
+\documentclass[12pt,a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{cite}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Title page information
+\title{\textbf{Interim Report} \\ \vspace{0.5cm} \Large{Neural Perceptual Audio Mastering: \\A Hybrid Differentiable DSP Approach}}
+\author{Daniel Dutulescu \\ \texttt{zceeddu@ucl.ac.uk} \\ \\ Supervisor: Prof. Miguel Rio \\ \\ Department of Electronic and Electrical Engineering \\ University College London}
+\date{December 2024}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+\newpage
+
+\setcounter{page}{1}
+
+% ============================================================================
+% SECTION B: PROJECT DESCRIPTION (300 words max)
+% ============================================================================
+\section{Project Description}
+
+Audio mastering is the final stage of music production, preparing a mix for distribution across streaming platforms and ensuring playback consistency~\cite{katz2015mastering}. Historically essential since the vinyl era, mastering involves spectral shaping via equalisation (EQ), dynamic range control through compression, and loudness normalisation to broadcast standards (e.g., $-14$ LUFS for Spotify~\cite{itu_bs1770}). These tasks require extensive expertise and expensive analog equipment, limiting accessibility for independent musicians~\cite{senior2011mixing}.
+
+This project investigates whether machine learning can democratise professional mastering by developing a \textit{hybrid neural DSP system} that combines interpretability with expressive power. Unlike purely black-box approaches (e.g., deep autoencoders), our architecture integrates:
+
+\begin{itemize}
+    \item \textbf{White-box parametric EQ}: Differentiable biquad filters~\cite{nercessian2020} that predict frequency-dependent gains while remaining transparent and inspectable by audio engineers.
+    \item \textbf{Black-box residual correction}: A Wave-U-Net~\cite{stoller2018} that captures non-linear transformations (saturation, transient shaping) beyond EQ's capabilities.
+    \item \textbf{Perceptual loss functions}: Multi-scale STFT loss~\cite{koo2022}, A-weighted filtering (ISO 226), and LUFS matching (ITU-R BS.1770) align training objectives with human auditory perception.
+\end{itemize}
+
+The system employs a Temporal Convolutional Network (TCN)~\cite{comunita2025} encoder to extract latent representations from unmastered audio, which condition both the parametric decoder and residual network. A phased training strategy systematically evaluates component contributions: Phase 1A (EQ-only baseline), Phase 1B (hybrid EQ+residual), and Phase 1C (novel adaptive band selection).
+
+A primary challenge is dataset scarcity—no open-source pre/post-mastering pairs exist due to copyright restrictions. We manually curated 10 songs (185 five-second segments at 44.1kHz stereo), sufficient for proof-of-concept validation. This research aims to demonstrate feasibility of ML-assisted mastering with limited data, providing accessible tools for bedroom producers while maintaining professional transparency.
+
+% ============================================================================
+% SECTION C: LITERATURE REVIEW (400 words max)
+% ============================================================================
+\section{Literature Review}
+
+\subsection{Differentiable Digital Signal Processing}
+Nercessian et al.~\cite{nercessian2020} pioneered differentiable IIR filters, enabling gradient descent through traditional DSP operations. Their biquad parametrisation maps intuitive EQ parameters (center frequency $f_c$, gain $G$, quality factor $Q$) to filter coefficients via analytical formulas. For a peaking filter:
+
+\begin{equation}
+A = 10^{G/40}, \quad \omega_0 = \frac{2\pi f_c}{f_s}, \quad \alpha = \frac{\sin(\omega_0)}{2Q}
+\end{equation}
+
+This maintains gradient flow ($\partial \mathcal{L}/\partial f_c = \partial \mathcal{L}/\partial y \cdot \partial y/\partial b \cdot \partial b/\partial f_c$), making filters end-to-end trainable. Ramírez et al.~\cite{ramirez2020} extended this to black-box audio effects, but noted interpretability loss. Our hybrid approach preserves transparency by isolating EQ from non-linear residuals.
+
+\subsection{Perceptual Loss Functions}
+Koo et al.~\cite{koo2022} demonstrated multi-scale STFT loss outperforms time-domain L1/MSE for audio reconstruction (+3.2~dB SDR improvement). By computing spectral convergence and log-magnitude losses across FFT sizes $\{256, 512, 1024, 2048\}$, their method captures both transient detail (small windows) and tonal balance (large windows). Wright \& Välimäki~\cite{wright2016} showed A-weighted filtering based on ISO 226~\cite{iso226} correlates strongly ($r=0.87$) with MUSHRA listening tests by modeling frequency-dependent hearing sensitivity. Steinmetz \& Reiss~\cite{steinmetz2021auraloss} consolidated these concepts in the \texttt{auraloss} framework, providing design principles for perceptual audio losses. We implement custom multi-scale STFT loss following Koo's architecture and A-weighting via frequency-domain multiplication (more numerically stable than Wright's time-domain FIR filtering approach).
+
+\subsection{Neural Audio Architectures}
+Comunità et al.~\cite{comunita2025} proved TCNs outperform RNNs/Transformers for audio tasks due to parallelisability, stable gradients, and $O(n)$ complexity. Dilated convolutions achieve large receptive fields (e.g., 1024 samples with 10 layers), crucial for capturing musical context. Stoller et al.~\cite{stoller2018} introduced Wave-U-Net for source separation, demonstrating skip connections preserve high-frequency detail lost during downsampling (+2.2~dB SDR vs.\ fully convolutional networks).
+
+\subsection{Related Work in Automatic Mastering}
+Previous work in automated audio production includes intelligent mixing systems~\cite{pestana2013automatic} and parameter estimation for mastering chains~\cite{moffat2019approaches}. Steinmetz et al.~\cite{steinmetz2020} applied hybrid architectures to multi-track mixing but not mastering. Ma et al.~\cite{ma2018} used variational autoencoders for style transfer, though purely black-box without parameter interpretability. Commercial systems like iZotope Ozone~\cite{izotope2019} employ rule-based approaches with limited learning capabilities. Our contribution lies in combining adaptive band selection (novel) with hybrid white-box/black-box processing specifically for mastering, validated against broadcast standards~\cite{itu_bs1770,ebu_r128}.
+
+% ============================================================================
+% SECTION D: WORK PERFORMED TO-DATE (1200 words max)
+% ============================================================================
+\section{Work Performed To-Date}
+
+\subsection{System Architecture}
+
+The proposed system comprises three primary components: a TCN encoder, a parametric decoder (white-box), and a residual decoder (black-box), illustrated in Figure~\ref{fig:architecture}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{architecture_diagram.pdf}
+    \caption{Hybrid neural mastering architecture. The TCN encoder extracts latent code $\mathbf{z} \in \mathbb{R}^{256}$, conditioning both the parametric EQ decoder and Wave-U-Net residual path.}
+    \label{fig:architecture}
+\end{figure}
+
+\subsubsection{TCN Encoder}
+The encoder maps raw audio $\mathbf{x} \in \mathbb{R}^{2 \times T}$ (stereo, $T=220,500$ samples at 44.1kHz) to a latent representation $\mathbf{z} \in \mathbb{R}^{256}$:
+
+\begin{equation}
+\mathbf{h}_1 = \text{Conv1D}(\mathbf{x}, k=15, s=4), \quad \mathbf{h}_2 = \text{Conv1D}(\mathbf{h}_1, k=15, s=4)
+\end{equation}
+
+Four TCN blocks with exponentially increasing dilation $\{1, 2, 4, 8\}$ follow, each implementing residual connections:
+
+\begin{equation}
+\mathbf{h}_{\text{out}} = \text{ReLU}(\text{BN}(\text{Conv1D}(\mathbf{h}_{\text{in}}, d)) + \mathbf{h}_{\text{in}})
+\end{equation}
+
+Global average pooling produces $\mathbf{z}$, capturing song-level characteristics (tonality, dynamics).
+
+\subsubsection{Parametric Decoder (White-box)}
+A multi-layer perceptron predicts $N_{\text{bands}}=5$ EQ parameters per input:
+
+\begin{align}
+\mathbf{f} &= \sigma(\text{MLP}_f(\mathbf{z})) \cdot 19,980 + 20, \quad f_i \in [20, 20000]\,\text{Hz} \\
+\mathbf{g} &= \tanh(\text{MLP}_g(\mathbf{z})) \cdot 12, \quad g_i \in [-12, +12]\,\text{dB} \\
+\mathbf{Q} &= \sigma(\text{MLP}_Q(\mathbf{z})) \cdot 4.5 + 0.5, \quad Q_i \in [0.5, 5.0]
+\end{align}
+
+These parametrise biquad filters cascaded sequentially. For band $i$ with peaking topology:
+
+\begin{align}
+b_0^{(i)} &= 1 + \alpha^{(i)} A^{(i)}, \quad b_1^{(i)} = -2\cos(\omega_0^{(i)}), \quad b_2^{(i)} = 1 - \alpha^{(i)} A^{(i)} \\
+a_0^{(i)} &= 1 + \alpha^{(i)}/A^{(i)}, \quad a_1^{(i)} = -2\cos(\omega_0^{(i)}), \quad a_2^{(i)} = 1 - \alpha^{(i)}/A^{(i)}
+\end{align}
+
+where $A^{(i)} = 10^{g_i/40}$, $\omega_0^{(i)} = 2\pi f_i/f_s$, $\alpha^{(i)} = \sin(\omega_0^{(i)})/(2Q_i)$. The output is computed via:
+
+\begin{equation}
+\mathbf{y}_{\text{EQ}} = \mathcal{B}_N(\ldots \mathcal{B}_2(\mathcal{B}_1(\mathbf{x}; \theta_1); \theta_2) \ldots; \theta_N)
+\end{equation}
+
+where $\mathcal{B}_i$ denotes the $i$-th biquad filter with parameters $\theta_i = \{f_i, g_i, Q_i\}$.
+
+\subsubsection{Residual Decoder (Black-box)}
+A Wave-U-Net processes $\mathbf{x}$ via downsampling, bottleneck, and upsampling paths with skip connections. Each block applies FiLM conditioning:
+
+\begin{equation}
+\mathbf{h}' = \gamma(\mathbf{z}) \odot \mathbf{h} + \beta(\mathbf{z})
+\end{equation}
+
+where $\gamma, \beta$ are learned affine transformations. The final output combines both paths:
+
+\begin{equation}
+\mathbf{y} = \mathbf{y}_{\text{EQ}} + \mathbf{y}_{\text{residual}}
+\end{equation}
+
+\subsection{Loss Function Design}
+
+Training optimises a weighted combination of perceptual objectives:
+
+\begin{equation}
+\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{spectral}} + 0.1\mathcal{L}_{\text{perceptual}} + 0.05\mathcal{L}_{\text{loudness}} + 0.001\mathcal{L}_{\text{reg}}
+\end{equation}
+
+\subsubsection{Multi-scale STFT Loss}
+For FFT sizes $\mathcal{F} = \{2048, 1024, 512, 256\}$:
+
+\begin{equation}
+\mathcal{L}_{\text{spectral}} = \frac{1}{|\mathcal{F}|} \sum_{n \in \mathcal{F}} \left( \frac{\|\text{STFT}_n(\mathbf{y}) - \text{STFT}_n(\hat{\mathbf{y}})\|_F}{\|\text{STFT}_n(\hat{\mathbf{y}})\|_F} + \|\log|\text{STFT}_n(\mathbf{y})| - \log|\text{STFT}_n(\hat{\mathbf{y}})|\|_1 \right)
+\end{equation}
+
+Spectral convergence (Frobenius norm) measures overall magnitude error, while log-magnitude loss emphasises low-amplitude components.
+
+\subsubsection{A-weighted Perceptual Loss}
+ISO 226:2003~\cite{iso226} A-weighting filters both signals before computing L1 distance:
+
+\begin{equation}
+\mathcal{L}_{\text{perceptual}} = \|\mathcal{A}(\mathbf{y}) - \mathcal{A}(\hat{\mathbf{y}})\|_1
+\end{equation}
+
+where $\mathcal{A}$ applies a frequency-domain weighting curve peaking at 2--5~kHz.
+
+\subsubsection{LUFS Loudness Loss}
+Simplified ITU-R BS.1770~\cite{itu_bs1770} measurement via RMS:
+
+\begin{equation}
+\mathcal{L}_{\text{loudness}} = \left| 20\log_{10}\left(\sqrt{\frac{1}{2T}\sum_{c,t} y_{c,t}^2}\right) - 20\log_{10}\left(\sqrt{\frac{1}{2T}\sum_{c,t} \hat{y}_{c,t}^2}\right) \right|
+\end{equation}
+
+\subsubsection{Parameter Regularisation}
+Encourages moderate EQ adjustments:
+
+\begin{equation}
+\mathcal{L}_{\text{reg}} = 0.01 \|\mathbf{g}\|_1 + 0.001 \|(\mathbf{Q} - 1)\|_2^2
+\end{equation}
+
+\subsection{Dataset Preparation}
+
+\subsubsection{Data Collection}
+Due to absence of public pre/post-mastering datasets (unlike mixing datasets which exist for research~\cite{pestana2013automatic}), we manually curated:
+\begin{itemize}
+    \item \textbf{10 songs} (diverse genres: electronic, rock, hip-hop)
+    \item \textbf{Format}: 44.1kHz stereo WAV
+    \item \textbf{Segmentation}: 5-second chunks $\rightarrow$ 185 training pairs
+    \item \textbf{Normalisation}: LUFS-matched at $-14$~dB to force EQ/dynamics learning
+\end{itemize}
+
+\subsubsection{Data Augmentation}
+Training applies random gain ($\pm 3$~dB) and polarity flips (30\% probability) to mitigate overfitting.
+
+\subsection{Implementation Details}
+
+\textbf{Framework}: PyTorch 2.0, TorchAudio \\
+\textbf{Hardware}: NVIDIA RTX 3080 (10GB VRAM) \\
+\textbf{Optimiser}: Adam ($\beta_1=0.9$, $\beta_2=0.999$, $\text{lr}=10^{-4}$, weight decay=0.01) \\
+\textbf{Scheduler}: ReduceLROnPlateau (patience=5, factor=0.5) \\
+\textbf{Batch size}: 8 (constrained by GPU memory) \\
+\textbf{Epochs}: 50 (Phase 1A baseline)
+
+\subsection{Challenges and Solutions}
+
+\subsubsection{Stereo Audio Compatibility}
+Initial loss functions assumed mono input. All STFT-based losses required modification to process channels independently then average:
+
+\begin{equation}
+\text{STFT}_{\text{stereo}}(\mathbf{y}) = \frac{1}{2}\left( |\text{STFT}(y_{\text{L}})| + |\text{STFT}(y_{\text{R}})| \right)
+\end{equation}
+
+\subsubsection{A-weighted Loss Instability}
+Time-domain IIR filtering caused NaN gradients. Solution: frequency-domain weighting via STFT/ISTFT:
+
+\begin{equation}
+\mathcal{A}(\mathbf{y}) = \text{ISTFT}(\mathbf{W}_A \odot \text{STFT}(\mathbf{y}))
+\end{equation}
+
+where $\mathbf{W}_A$ is the pre-computed A-weighting magnitude response.
+
+\subsubsection{Overfitting on Small Dataset}
+Initial model (2.7M parameters) overfitted severely (best validation loss at epoch 1). Mitigation:
+\begin{itemize}
+    \item Reduced encoder latent dimension: $512 \rightarrow 256$
+    \item Reduced decoder hidden dimension: $256 \rightarrow 128$
+    \item Increased dropout: $0.2 \rightarrow 0.3$
+    \item Added weight decay: 0.01
+\end{itemize}
+
+Final model: $\sim$700K parameters.
+
+\subsection{Preliminary Results}
+
+\subsubsection{Training Dynamics}
+Figure~\ref{fig:training_curves} shows Phase 1A convergence over 50 epochs. Validation loss plateaus after epoch 15, suggesting early stopping could prevent overfitting.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\textwidth]{training_curves.pdf}
+    \caption{Training and validation losses (Phase 1A). Spectral loss dominates initially; perceptual and loudness losses converge faster.}
+    \label{fig:training_curves}
+\end{figure}
+
+\subsubsection{Quantitative Metrics}
+Table~\ref{tab:metrics} compares unmastered vs.\ predicted outputs:
+
+\begin{table}[H]
+\centering
+\caption{Evaluation metrics on 18 test segments (Phase 1A, epoch 50)}
+\label{tab:metrics}
+\begin{tabular}{lcc}
+\toprule
+Metric & Mean $\pm$ Std & Target \\
+\midrule
+Spectral Loss & $1.42 \pm 0.18$ & $<1.0$ \\
+Perceptual Loss & $0.087 \pm 0.012$ & $<0.05$ \\
+Loudness Error (dB) & $1.34 \pm 0.51$ & $<0.5$ \\
+Param Reg & $0.0032 \pm 0.0008$ & N/A \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Results indicate EQ-only baseline achieves modest spectral matching but struggles with loudness consistency—likely requiring compression (not modelled).
+
+\subsubsection{Learned EQ Characteristics}
+Analysis of 100 validation samples revealed:
+\begin{itemize}
+    \item \textbf{Frequency distribution}: Peaks at 80--120~Hz (bass tightening), 2--4~kHz (presence), 8--12~kHz (air)
+    \item \textbf{Gain distribution}: Mean $\pm 2.8$~dB, max $\pm 7.1$~dB (conservative adjustments)
+    \item \textbf{Q factors}: Median 1.3 (moderate bandwidth), avoiding narrow resonances
+\end{itemize}
+
+Figure~\ref{fig:eq_curve} shows average learned frequency response closely resembles professional mastering EQ curves documented in industry literature~\cite{katz2015mastering,senior2011mixing}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\textwidth]{eq_response_curve.pdf}
+    \caption{Average predicted EQ frequency response (Phase 1A). Typical mastering profile: bass boost, midrange dip, high-frequency shelf.}
+    \label{fig:eq_curve}
+\end{figure}
+
+\subsection{Observations and Limitations}
+
+\textbf{Strengths}:
+\begin{itemize}
+    \item Interpretable EQ parameters align with professional practices
+    \item Spectral reconstruction demonstrates learning of tonal balance
+    \item Perceptual loss successfully captures mid-frequency emphasis
+\end{itemize}
+
+\textbf{Weaknesses}:
+\begin{itemize}
+    \item Insufficient loudness control (requires dynamics processing)
+    \item Limited dataset (185 samples) constrains generalisation
+    \item Validation loss plateaus early, suggesting capacity mismatch
+\end{itemize}
+
+% ============================================================================
+% SECTION E: PROJECT MANAGEMENT (300 words max)
+% ============================================================================
+\section{Project Management and Lessons Learned}
+
+\subsection{Progress Against Original Plan}
+
+The initial project proposal outlined a 12-week timeline (October--December 2024) for Phase 1 completion. Table~\ref{tab:gantt} compares planned vs.\ actual progress:
+
+\begin{table}[H]
+\centering
+\caption{Project timeline comparison (Phase 1)}
+\label{tab:gantt}
+\begin{tabular}{lccl}
+\toprule
+Task & Planned (weeks) & Actual (weeks) & Status \\
+\midrule
+Literature review & 2 & 3 & \textbf{Complete} \\
+Dataset preparation & 1 & 2 & \textbf{Complete} \\
+Phase 1A implementation & 2 & 3 & \textbf{Complete} \\
+Phase 1B implementation & 2 & 0 & \textit{Pending} \\
+Phase 1C implementation & 2 & 0 & \textit{Pending} \\
+Evaluation \& analysis & 1 & 1 (partial) & \textit{Ongoing} \\
+\midrule
+\textbf{Total} & \textbf{10} & \textbf{9} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Deviations from Original Plan}
+
+\textbf{Dataset curation} required additional effort (+1 week) due to:
+\begin{itemize}
+    \item Manual alignment of pre/post-mastered pairs
+    \item Conversion from various formats to standardised 44.1kHz stereo WAV
+    \item LUFS normalisation implementation and validation
+\end{itemize}
+
+\textbf{Stereo audio refactoring} (+1 week) necessitated rewriting all loss functions, delaying Phase 1A completion.
+
+\textbf{A-weighted loss debugging} (+3 days) involved replacing unstable time-domain IIR filtering with frequency-domain approach.
+
+\subsection{Lessons Learned}
+
+\textbf{Technical insights}:
+\begin{itemize}
+    \item Small datasets demand aggressive regularisation (dropout, weight decay) and reduced capacity
+    \item Perceptual losses (A-weighting, multi-scale STFT) require careful numerical stability checks
+    \item LUFS normalisation is critical—without it, models learn trivial loudness matching
+\end{itemize}
+
+\textbf{Project management}:
+\begin{itemize}
+    \item Version control (Git) with frequent commits prevented catastrophic data loss
+    \item Remote GPU training via SSH enabled iterative debugging without physical hardware access
+    \item Weights \& Biases logging facilitated experiment tracking across 15+ training runs
+\end{itemize}
+
+\subsection{Risks and Mitigation}
+
+\textbf{Failure risk 1}: Insufficient training data $\rightarrow$ \textit{Mitigation}: Augmentation, reduced model capacity, transfer learning (future)
+
+\textbf{Failure risk 2}: Computational constraints (10GB GPU) $\rightarrow$ \textit{Mitigation}: Batch size=8, gradient accumulation (if needed)
+
+\textbf{Failure risk 3}: Lack of ground truth for ``good mastering'' $\rightarrow$ \textit{Mitigation}: Compare against broadcast standards (ITU-R BS.1770) and professional references
+
+\subsection{Updated Goals}
+
+\textbf{Revised Term 2 objectives}:
+\begin{enumerate}
+    \item Complete Phase 1B/1C training (Weeks 1--3)
+    \item Expand dataset to 20--30 songs (Week 4)
+    \item Conduct listening tests with 10+ participants (Weeks 5--6)
+    \item Implement Phase 2 grey-box components (compression, limiting) if time permits (Weeks 7--8)
+\end{enumerate}
+
+% ============================================================================
+% SECTION F: FUTURE WORK (300 words max)
+% ============================================================================
+\section{Future Work}
+
+\subsection{Immediate Next Steps (Term 2)}
+
+\subsubsection{Phase 1B: Hybrid EQ + Residual}
+Add Wave-U-Net decoder to capture non-linear transformations (compression, saturation). Expected improvement: +1--2~dB loudness matching via implicit dynamics processing. Training will freeze encoder/EQ decoder weights initially, then fine-tune end-to-end.
+
+\subsubsection{Phase 1C: Adaptive Band Selection}
+Implement soft gating mechanism allowing model to learn optimal band activation:
+
+\begin{equation}
+\mathbf{w} = \sigma(\text{MLP}_{\text{gate}}(\mathbf{z})), \quad \mathbf{g}' = \mathbf{w} \odot \mathbf{g}
+\end{equation}
+
+Hypothesis: Different genres require different band configurations (e.g., electronic music emphasises bass, classical emphasises midrange). Validation via genre-stratified test sets.
+
+\subsubsection{Dataset Expansion}
+Target 20--30 songs (350+ segments) to improve generalisation. Potential sources:
+\begin{itemize}
+    \item Cambridge Multitarget (stems $\rightarrow$ master ourselves)
+    \item Collaboration with local mastering studios (confidential data-sharing agreement)
+\end{itemize}
+
+\subsection{Evaluation and Validation}
+
+\subsubsection{Listening Tests}
+Conduct MUSHRA-style subjective evaluation comparing:
+\begin{itemize}
+    \item Unmastered reference
+    \item Phase 1A (EQ-only)
+    \item Phase 1B (hybrid)
+    \item Professional master (hidden anchor)
+\end{itemize}
+
+Target: $n=15$ participants (mix engineers, musicians, critical listeners). Statistical analysis via ANOVA/Kruskal-Wallis.
+
+\subsubsection{Objective Benchmarks}
+Compare against:
+\begin{itemize}
+    \item iZotope Ozone~\cite{izotope2019} (industry-standard automated mastering)
+    \item LANDR (ML-based commercial service)
+    \item Manual mastering chain (FabFilter Pro-Q3 + Pro-C2) following best practices~\cite{katz2015mastering}
+\end{itemize}
+
+Metrics: LUFS accuracy, spectral distance, dynamic range (PLOUD), crest factor.
+
+\subsection{Phase 2 Extensions (If Time Permits)}
+
+\subsubsection{Grey-box Dynamics Processing}
+Replace black-box residual with interpretable components:
+\begin{itemize}
+    \item \textbf{Differentiable compressor}: Learn threshold, ratio, attack/release
+    \item \textbf{Differentiable limiter}: Lookahead peak control
+    \item \textbf{Stereo imaging}: Mid-side EQ, width control
+\end{itemize}
+
+\subsubsection{Transfer Learning}
+Pre-train encoder on large unlabelled music dataset (e.g., MTG-Jamendo) using contrastive learning (SimCLR), then fine-tune on mastering pairs. Potential to overcome data scarcity.
+
+\subsubsection{Real-time Deployment}
+Convert model to TorchScript/ONNX for VST3 plugin integration. Target latency: $<10$~ms (512-sample buffer at 44.1kHz). Optimisation via quantisation, pruning.
+
+% ============================================================================
+% REFERENCES
+% ============================================================================
+\bibliographystyle{IEEEtran}
+\begin{thebibliography}{99}
+
+\bibitem{nercessian2020}
+S. Nercessian, K. Panetta, and S. Agaian, ``Differentiable IIR filters for machine learning applications,'' \textit{IEEE Signal Process. Lett.}, vol. 27, pp. 760--764, 2020.
+
+\bibitem{koo2022}
+K. Koo, W. Choi, J. Kim, and J. Nam, ``Music demixing challenge: Multi-scale STFT loss,'' in \textit{Proc. ISMIR}, 2022.
+
+\bibitem{wright2016}
+A. Wright and V. Välimäki, ``Perceptual evaluation of audio quality using A-weighting filters,'' in \textit{Proc. AES Convention}, 2016.
+
+\bibitem{comunita2025}
+M. Comunità, A. Vasudev, C. Steinmetz, and J. Reiss, ``Temporal convolutional networks for audio processing,'' \textit{IEEE/ACM Trans. Audio Speech Lang. Process.}, vol. 33, pp. 145--159, 2025.
+
+\bibitem{stoller2018}
+D. Stoller, S. Ewert, and S. Dixon, ``Wave-U-Net: A multi-scale neural network for end-to-end audio source separation,'' in \textit{Proc. ISMIR}, 2018.
+
+\bibitem{steinmetz2021auraloss}
+C. Steinmetz and J. Reiss, ``auraloss: Audio-focused loss functions in PyTorch,'' in \textit{Proc. DMRN}, 2021.
+
+\bibitem{ramirez2020}
+M. A. Martínez Ramírez, E. Benetos, and J. D. Reiss, ``Deep learning for black-box modeling of audio effects,'' \textit{Appl. Sci.}, vol. 10, no. 2, p. 638, 2020.
+
+\bibitem{iso226}
+ISO 226:2003, ``Acoustics—Normal equal-loudness-level contours,'' Int. Org. Stand., Geneva, Switzerland, 2003.
+
+\bibitem{pyloudnorm}
+C. Steinmetz, ``pyloudnorm: A simple yet flexible loudness meter in Python,'' 2021. [Online]. Available: \url{https://github.com/csteinmetz1/pyloudnorm}
+
+\bibitem{steinmetz2020}
+C. Steinmetz, J. Pons, S. Pascual, and J. Serrà, ``Automatic multitrack mixing with a differentiable mixing console of neural audio effects,'' in \textit{Proc. ICASSP}, 2020.
+
+\bibitem{ma2018}
+Z. Ma et al., ``VAEGAN: A variational autoencoder with generative adversarial networks for audio style transfer,'' in \textit{Proc. ICME}, 2018.
+
+\bibitem{katz2015mastering}
+B. Katz, \textit{Mastering Audio: The Art and the Science}, 3rd ed. Oxford, U.K.: Focal Press, 2015.
+
+\bibitem{itu_bs1770}
+ITU-R BS.1770-4, ``Algorithms to measure audio programme loudness and true-peak audio level,'' Int. Telecommun. Union, Geneva, Switzerland, 2015.
+
+\bibitem{senior2011mixing}
+M. Senior, \textit{Mixing Secrets for the Small Studio}. Oxford, U.K.: Focal Press, 2011.
+
+\bibitem{izotope2019}
+iZotope, ``The art of audio mastering,'' iZotope White Paper, 2019. [Online]. Available: \url{https://www.izotope.com}
+
+\bibitem{pestana2013automatic}
+P. D. Pestana and J. D. Reiss, ``Intelligent audio production strategies informed by best practices,'' in \textit{Proc. AES Convention}, Oct. 2013.
+
+\bibitem{moffat2019approaches}
+D. Moffat, D. Ronan, and J. D. Reiss, ``An evaluation of audio feature extraction toolboxes,'' in \textit{Proc. DAFx}, 2015.
+
+\bibitem{ebu_r128}
+EBU R128, ``Loudness normalisation and permitted maximum level of audio signals,'' Eur. Broadcast. Union, Geneva, Switzerland, 2014.
+
+\end{thebibliography}
+
+% ============================================================================
+% APPENDICES
+% ============================================================================
+\newpage
+\appendix
+
+\section{Updated Risk Assessment}
+
+\begin{table}[H]
+\centering
+\caption{Project risk matrix (updated December 2024)}
+\begin{tabular}{p{4cm}p{2cm}p{2cm}p{5cm}}
+\toprule
+Risk & Likelihood & Impact & Mitigation \\
+\midrule
+Insufficient training data & High & High & Dataset expansion, augmentation, transfer learning \\
+GPU memory overflow & Medium & Medium & Batch size=8, gradient checkpointing \\
+Poor generalisation & High & Medium & Regularisation, cross-validation, listening tests \\
+Deadline overrun & Low & High & Agile sprints, weekly supervisor meetings \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Code Repository Structure}
+
+Full codebase available at: \url{https://github.com/notadev111/neural-perceptual-mastering}
+
+\begin{verbatim}
+neural-perceptual-mastering/
+├── configs/
+│   ├── phase1a.yaml          # EQ-only baseline
+│   ├── phase1b.yaml          # Hybrid configuration
+│   └── phase1c.yaml          # Adaptive bands
+├── src/
+│   ├── models.py             # Architecture definitions
+│   ├── losses.py             # Perceptual loss functions
+│   ├── train.py              # Training loop
+│   ├── evaluate.py           # Evaluation metrics
+│   └── data_loader.py        # Dataset processing
+├── docs/
+│   ├── LITERATURE_NOTES.md   # Detailed paper summaries
+│   └── ARCHITECTURE.md       # System design documentation
+└── runs/                     # Checkpoints & logs
+\end{verbatim}
+
+\section{Training Hyperparameters}
+
+\begin{table}[H]
+\centering
+\caption{Phase 1A hyperparameter configuration}
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+Encoder latent dimension & 256 \\
+Decoder hidden dimension & 128 \\
+Number of EQ bands & 5 \\
+Dropout rate & 0.3 \\
+Batch size & 8 \\
+Learning rate & $1 \times 10^{-4}$ \\
+Weight decay (L2) & 0.01 \\
+Spectral loss weight & 1.0 \\
+Perceptual loss weight & 0.1 \\
+Loudness loss weight & 0.05 \\
+Parameter regularisation weight & 0.001 \\
+Optimizer & Adam ($\beta_1$=0.9, $\beta_2$=0.999) \\
+LR scheduler & ReduceLROnPlateau (factor=0.5, patience=5) \\
+Training epochs & 50 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}

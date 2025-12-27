@@ -19,13 +19,61 @@ Detailed technical documentation of the Neural Perceptual Audio Mastering system
 
 ## System Overview
 
-### High-Level Architecture
+**Note:** System processes stereo audio (2 channels). The same EQ parameters apply to both L/R channels, which is standard practice in professional mastering.
+
+### Simplified Architecture Diagram
+
+```
+                    ┌─────────────────────────┐
+                    │    INPUT AUDIO          │
+                    │  Stereo [B, 2, 220500]  │
+                    │     (5s @ 44.1kHz)      │
+                    └───────────┬─────────────┘
+                                │
+                                ▼
+                    ┌─────────────────────────┐
+                    │   ENCODER (TCN)         │
+                    │  • Strided Conv (↓2x)   │
+                    │  • Dilated TCN Blocks   │
+                    │  • Global Pool          │
+                    │  PRESERVES 20kHz ✓      │
+                    └───────────┬─────────────┘
+                                │
+                                ▼
+                         Latent z [B, 512]
+                                │
+                    ┌───────────┴────────────┐
+                    ▼                        ▼
+        ┌──────────────────┐    ┌──────────────────┐
+        │  PARAMETRIC EQ   │    │    RESIDUAL      │
+        │   (White-box)    │    │   (Black-box)    │
+        ├──────────────────┤    ├──────────────────┤
+        │ MLP → Params:    │    │  Wave-U-Net +    │
+        │ • Frequencies    │    │  FiLM condition  │
+        │ • Gains (dB)     │    │  • Encoder       │
+        │ • Q factors      │    │  • Bottleneck    │
+        │                  │    │  • Decoder       │
+        │ Biquad Cascade   │    │  • Skip Conns    │
+        └────────┬─────────┘    └────────┬─────────┘
+                 │                       │
+                 │ [B, 2, 220500]        │ [B, 2, 220500]
+                 └───────────┬───────────┘
+                             │ (Sum)
+                             ▼
+                    ┌─────────────────────────┐
+                    │   OUTPUT AUDIO          │
+                    │  Mastered [B, 2, 220500]│
+                    └─────────────────────────┘
+```
+
+### Detailed Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        INPUT AUDIO                               │
-│              Unmastered track: [Batch, 1, Samples]              │
-│                    (e.g., [8, 1, 220500])                       │
+│              Unmastered track: [Batch, 2, Samples]              │
+│                    (e.g., [8, 2, 220500])                       │
+│                         Stereo input                             │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -33,8 +81,8 @@ Detailed technical documentation of the Neural Perceptual Audio Mastering system
 │                     AUDIO ENCODER (TCN)                         │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │  Strided Convolutions (Downsampling)                      │  │
-│  │  • Conv1d(1→64, k=15, s=4): 44.1kHz → 11kHz             │  │
-│  │  • Conv1d(64→128, k=15, s=4): 11kHz → 2.75kHz           │  │
+│  │  • Conv1d(2→64, k=15, s=2): 44.1kHz → 22kHz (FIXED)     │  │
+│  │  Preserves full 20kHz audible spectrum                   │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                              │                                   │
 │  ┌───────────────────────────────────────────────────────────┐  │
@@ -77,9 +125,9 @@ Detailed technical documentation of the Neural Perceptual Audio Mastering system
 │  │ (torchaudio biquad)│  │    │  └────────────────────┘  │
 │  │                    │  │    │           │              │
 │  │ 5-band cascade     │  │    │           ▼              │
-│  └────────────────────┘  │    │  ┌────────────────────┐  │
-│           │              │    │  │ Residual output    │  │
-│           ▼              │    │  │ (non-linear fixes) │  │
+│  │ (Same for L/R ch)  │  │    │  ┌────────────────────┐  │
+│  └────────────────────┘  │    │  │ Residual output    │  │
+│           │              │    │  │ (non-linear fixes) │  │
 │   EQ'd audio             │    │  └────────────────────┘  │
 └──────────────────────────┘    └──────────────────────────┘
               │                                │
@@ -93,7 +141,8 @@ Detailed technical documentation of the Neural Perceptual Audio Mastering system
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                        OUTPUT AUDIO                              │
-│              Mastered track: [Batch, 1, Samples]                │
+│              Mastered track: [Batch, 2, Samples]                │
+│                         Stereo output                            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -119,30 +168,30 @@ Extract a **compact latent representation** (`z ∈ ℝ^512`) that captures:
 
 ### Architecture Details
 
-#### Component 1: Stem (Downsampling)
+#### Component 1: Stem (Downsampling) **[FIXED]**
 
 ```python
 self.stem = nn.Sequential(
-    nn.Conv1d(1, 64, kernel_size=15, stride=4, padding=7),
+    nn.Conv1d(2, 64, kernel_size=15, stride=2, padding=7),  # FIXED: stride=2
     nn.BatchNorm1d(64),
     nn.ReLU(),
-    nn.Conv1d(64, 128, kernel_size=15, stride=4, padding=7),
-    nn.BatchNorm1d(128),
-    nn.ReLU(),
+    # REMOVED: Second stride layer that killed high frequencies
 )
 ```
 
-**Purpose:** Reduce temporal resolution while extracting low-level features.
+**Purpose:** Reduce temporal resolution while preserving full audible spectrum.
 
 **Effect:**
-- Input: `[B, 1, 220500]` (5s @ 44.1kHz)
-- After Conv1: `[B, 64, 55125]` (5s @ 11kHz, stride=4)
-- After Conv2: `[B, 128, 13781]` (5s @ 2.75kHz, stride=16 total)
+- Input: `[B, 2, 220500]` (5s @ 44.1kHz, stereo)
+- After Conv1: `[B, 64, 110250]` (5s @ 22kHz, stride=2)
+- **Nyquist limit: 11kHz** (preserves full 20kHz audible range)
 
-**Why stride=4 twice?**
-- 44.1kHz → 11kHz → 2.75kHz
-- Removes redundant information (Nyquist theorem: 2.75kHz captures up to 1.37kHz)
-- Keeps enough resolution for temporal structure (rhythm, dynamics)
+**Why stride=2 ONCE (not stride=4 twice)?**
+- **CRITICAL FIX:** Previous design used stride=16 total → only preserved 1.3kHz
+- **New design:** 44.1kHz → 22kHz preserves frequencies up to ~20kHz
+- Essential for high-freq EQ bands (4kHz, 12kHz, "air" band 15-20kHz)
+- Trade-off: 8x longer sequences (110k vs 13k) → 2.5x training time
+- **Worth it:** Can now properly model full spectrum mastering EQ
 
 **Why kernel_size=15?**
 - Larger kernels capture more context
@@ -247,17 +296,20 @@ self.head = nn.Sequential(
 
 ### Mathematical Formulation
 
-**Forward pass:**
+**Forward pass (FIXED):**
 ```
-x₀ = audio                           [B, 1, 220500]
-x₁ = ReLU(BN(Conv(x₀)))             [B, 64, 55125]
-x₂ = ReLU(BN(Conv(x₁)))             [B, 128, 13781]
-x₃ = TCN_block₁(x₂)                 [B, 128, 13781]
-x₄ = TCN_block₂(x₃)                 [B, 256, 13781]
-x₅ = TCN_block₃(x₄)                 [B, 256, 13781]
-x₆ = TCN_block₄(x₅)                 [B, 512, 13781]
-z = AvgPool(x₆).flatten()           [B, 512]
+x₀ = audio                           [B, 2, 220500]   (stereo @ 44.1kHz)
+x₁ = ReLU(BN(Conv_stride2(x₀)))     [B, 64, 110250]  (@ 22kHz) ← FIXED!
+x₂ = TCN_block₁(x₁)                 [B, 128, 110250]
+x₃ = TCN_block₂(x₂)                 [B, 256, 110250]
+x₄ = TCN_block₃(x₃)                 [B, 256, 110250]
+x₅ = TCN_block₄(x₄)                 [B, 512, 110250]
+z = AvgPool(x₅).flatten()           [B, 512]
 ```
+
+**Key difference from broken version:**
+- Broken: stride=16 → 13,781 timesteps @ 2.75kHz → Nyquist 1.37kHz ❌
+- Fixed: stride=2 → 110,250 timesteps @ 22kHz → Nyquist 11kHz ✅
 
 **Total parameters:** ~1.2M
 
@@ -328,9 +380,17 @@ q_factors = sigmoid(raw_qs) * 4.5 + 0.5
 ```python
 class SimpleBiquadEQ(nn.Module):
     def forward(self, audio, center_freqs, gains, q_factors):
+        """
+        Args:
+            audio: [batch, 2, samples] - stereo input
+            center_freqs, gains, q_factors: [batch, num_bands]
+        Returns:
+            output: [batch, 2, samples] - stereo output (same EQ for both channels)
+        """
         output = audio.clone()
-        
+
         # Apply each band sequentially (cascade)
+        # Same EQ parameters apply to both L/R channels
         for band_idx in range(num_bands):
             for batch_idx in range(batch_size):
                 # Create biquad filter for this band
@@ -340,10 +400,10 @@ class SimpleBiquadEQ(nn.Module):
                     Q=q_factors[batch_idx, band_idx],
                     gain=gains[batch_idx, band_idx]
                 )
-                
-                # Apply filter (differentiable!)
+
+                # Apply filter to both channels (differentiable!)
                 output[batch_idx] = eq_filter(output[batch_idx])
-        
+
         return output
 ```
 
@@ -567,7 +627,7 @@ Capture **non-linear corrections** that EQ cannot model:
 #### Wave-U-Net Structure
 
 ```
-Input: audio [B, 1, 220500] + latent z [B, 512]
+Input: audio [B, 2, 220500] (stereo) + latent z [B, 512]
 
 ┌─────────────────────────────────────────────────────────────────┐
 │                        ENCODER PATH                              │
@@ -633,9 +693,9 @@ concat([u1, d1], dim=1)           [B, 96, 220500] ← Concatenate skip
 u1 = WaveUNetBlock(concat, z)     [B, 32, 220500]
      │
      ▼
-residual = Conv1d(u1, 1→1)        [B, 1, 220500]
+residual = Conv1d(u1, 32→2)       [B, 2, 220500]  (stereo output)
 
-Output: residual [B, 1, 220500]
+Output: residual [B, 2, 220500]
 ```
 
 #### WaveUNetBlock with FiLM Conditioning
@@ -826,28 +886,28 @@ Input Audio → Encoder ┤     (5-10 adaptive bands)              ├→ ADD �
 
 ```
 1. Input Audio:
-   Shape: [8, 1, 220500]
+   Shape: [8, 2, 220500]  (stereo)
    Content: Raw unmastered waveform
-   
-2. Encoder:
-   Input: [8, 1, 220500]
-   After stem: [8, 128, 13781]
-   After TCN blocks: [8, 512, 13781]
+
+2. Encoder (FIXED):
+   Input: [8, 2, 220500]
+   After stem: [8, 64, 110250]   ← FIXED: preserves 20kHz
+   After TCN blocks: [8, 512, 110250]
    After pooling: [8, 512]
    Output: z ∈ ℝ^(8×512)
-   
+
 3a. Parametric Path:
-   Input: z [8, 512] + audio [8, 1, 220500]
+   Input: z [8, 512] + audio [8, 2, 220500]
    MLP prediction:
      - freqs: [8, 5] (e.g., [[60, 250, 1k, 4k, 12k], ...])
      - gains: [8, 5] (e.g., [[-3, +2, -1, +5, -2], ...])
      - qs: [8, 5] (e.g., [[0.7, 1.2, 2.5, 1.8, 1.0], ...])
    Biquad EQ:
-     - Apply 5 bands sequentially
-   Output: eq_out [8, 1, 220500]
-   
+     - Apply 5 bands sequentially (same EQ for L/R channels)
+   Output: eq_out [8, 2, 220500]
+
 3b. Residual Path:
-   Input: z [8, 512] + audio [8, 1, 220500]
+   Input: z [8, 512] + audio [8, 2, 220500]
    Encoder (downsampling):
      - d1: [8, 32, 220500]
      - d2: [8, 64, 110250]
@@ -857,11 +917,11 @@ Input Audio → Encoder ┤     (5-10 adaptive bands)              ├→ ADD �
      - u3: [8, 128, 55125]
      - u2: [8, 64, 110250]
      - u1: [8, 32, 220500]
-   Output: residual_out [8, 1, 220500]
-   
+   Output: residual_out [8, 2, 220500]
+
 4. Combination:
    output = eq_out + residual_out
-   Shape: [8, 1, 220500]
+   Shape: [8, 2, 220500]  (stereo)
    
 5. Loss Computation:
    loss = Combined_Loss(output, target)

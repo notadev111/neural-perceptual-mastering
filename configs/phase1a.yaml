@@ -13,7 +13,7 @@ model:
     dropout: 0.3     # Increased from 0.2 (more regularization)
 
 training:
-  batch_size: 8
+  batch_size: 4  # REDUCED from 8 due to 8x longer sequences (stride=2 encoder fix)
   learning_rate: 0.0001
   epochs: 50
   weight_decay: 0.01  # L2 regularization for small dataset
@@ -27,7 +27,7 @@ training:
 data:
   segment_length: 5.0
   sample_rate: 44100
-  data_dir: "C:/Users/danie/Documents/!ELEC0030 Project/neural-perceptual-master training/processed/train"
+  data_dir: "/home/zceeddu/neural-perceptual-mastering/data/processed/train/"
   train_split: 0.8
   val_split: 0.1
   test_split: 0.1
