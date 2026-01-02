@@ -191,7 +191,7 @@ def fix_data_alignment(data_dir, backup=True, threshold_ms=1.0):
     print(f"\n[VERIFY] Re-checking alignment...")
 
     offsets_after = []
-    for um_file, m_file in unmastered_files[:20]:  # Check first 20
+    for um_file, m_file in zip(unmastered_files[:20], mastered_files[:20]):  # Check first 20
         try:
             um_audio, um_sr = torchaudio.load(str(um_file))
             m_audio, m_sr = torchaudio.load(str(m_file))
