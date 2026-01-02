@@ -6,9 +6,13 @@ Loads best checkpoint and evaluates on held-out test data.
 import torch
 import yaml
 from pathlib import Path
-from src.models import build_model
+from src.models import (
+    MasteringModel_Phase1A,
+    MasteringModel_Phase1B,
+    MasteringModel_Phase1C
+)
 from src.data_loader import get_dataloaders
-from src.losses import MasteringLoss
+from src.losses import CombinedLoss
 from tqdm import tqdm
 
 
@@ -41,7 +45,19 @@ def test_model(config_path, checkpoint_path):
 
     # Build model
     print("\nBuilding model...")
-    model = build_model(config).to(device)
+    phase = config['model']['phase']
+
+    if phase == '1A':
+        model = MasteringModel_Phase1A(config).to(device)
+        print("Model: Phase 1A - Parametric EQ only (white-box)")
+    elif phase == '1B':
+        model = MasteringModel_Phase1B(config).to(device)
+        print("Model: Phase 1B - EQ + Residual (hybrid)")
+    elif phase == '1C':
+        model = MasteringModel_Phase1C(config).to(device)
+        print("Model: Phase 1C - Adaptive bands + Residual (novel)")
+    else:
+        raise ValueError(f"Unknown phase: {phase}")
 
     # Load checkpoint
     print(f"\nLoading checkpoint: {checkpoint_path}")
@@ -53,7 +69,7 @@ def test_model(config_path, checkpoint_path):
     print(f"Checkpoint val loss: {checkpoint.get('val_loss', 'unknown'):.4f}")
 
     # Setup loss
-    loss_fn = MasteringLoss(
+    loss_fn = CombinedLoss(
         spectral_weight=config['training']['loss_weights']['spectral'],
         perceptual_weight=config['training']['loss_weights']['perceptual'],
         loudness_weight=config['training']['loss_weights']['loudness'],
