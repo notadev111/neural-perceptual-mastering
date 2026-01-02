@@ -106,15 +106,15 @@ def test_model(config_path, checkpoint_path):
                 eq_params = None
 
             # Compute loss
-            loss_dict = loss_fn(output, mastered, eq_params)
+            loss, loss_dict = loss_fn(output, mastered, eq_params)
 
             # Store losses
-            test_losses.append(loss_dict['total'].item())
-            test_spectral.append(loss_dict['spectral'].item())
-            test_perceptual.append(loss_dict['perceptual'].item())
-            test_loudness.append(loss_dict['loudness'].item())
+            test_losses.append(loss.item())
+            test_spectral.append(loss_dict['spectral'])
+            test_perceptual.append(loss_dict['perceptual'])
+            test_loudness.append(loss_dict['loudness'])
             if 'param_reg' in loss_dict:
-                test_param_reg.append(loss_dict['param_reg'].item())
+                test_param_reg.append(loss_dict['param_reg'])
 
     # Compute averages
     avg_loss = sum(test_losses) / len(test_losses)
