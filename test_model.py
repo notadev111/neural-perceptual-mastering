@@ -93,7 +93,17 @@ def test_model(config_path, checkpoint_path):
             mastered = mastered.to(device)
 
             # Forward pass
-            output, eq_params = model(unmastered)
+            output, params = model(unmastered)
+
+            # Extract EQ params as tuple for loss function
+            if 'eq_frequencies' in params:
+                eq_params = (
+                    params['eq_frequencies'],
+                    params['eq_gains'],
+                    params['eq_q_factors']
+                )
+            else:
+                eq_params = None
 
             # Compute loss
             loss_dict = loss_fn(output, mastered, eq_params)
