@@ -37,39 +37,64 @@ def find_alignment_offset(audio1, audio2, sr=44100):
 
     return offset_samples
 
-def align_audio(audio, offset_samples):
+def align_audio(audio, offset_samples, target_length=None):
     """
-    Shift audio by offset_samples to align.
+    Shift audio by offset_samples to align, preserving original length.
 
     Args:
         audio: [channels, samples] tensor
         offset_samples: Number of samples to shift
                        Positive = shift right (delay)
                        Negative = shift left (advance)
+        target_length: If provided, ensure output matches this length
 
     Returns:
-        aligned_audio: [channels, samples] tensor
+        aligned_audio: [channels, samples] tensor (same length as input)
     """
     if offset_samples == 0:
+        if target_length and audio.shape[-1] != target_length:
+            # Trim or pad to match target length
+            if audio.shape[-1] > target_length:
+                return audio[:, :target_length]
+            else:
+                pad_len = target_length - audio.shape[-1]
+                return torch.cat([audio, torch.zeros(audio.shape[0], pad_len)], dim=1)
         return audio
 
     channels, samples = audio.shape
+    original_length = target_length if target_length else samples
 
     if offset_samples > 0:
         # Shift right (audio is ahead, need to delay it)
-        # Pad at start, trim at end
+        # Pad at start, keep original length
+        if offset_samples >= samples:
+            # Offset larger than signal - return zeros
+            return torch.zeros(channels, original_length)
+
         aligned = torch.cat([
             torch.zeros(channels, offset_samples),
-            audio[:, :-offset_samples]
+            audio[:, :samples-offset_samples]
         ], dim=1)
     else:
         # Shift left (audio is behind, need to advance it)
-        # Trim at start, pad at end
         offset_samples = abs(offset_samples)
+
+        if offset_samples >= samples:
+            # Offset larger than signal - return zeros
+            return torch.zeros(channels, original_length)
+
         aligned = torch.cat([
             audio[:, offset_samples:],
             torch.zeros(channels, offset_samples)
         ], dim=1)
+
+    # Ensure exact length match
+    if aligned.shape[-1] != original_length:
+        if aligned.shape[-1] > original_length:
+            aligned = aligned[:, :original_length]
+        else:
+            pad_len = original_length - aligned.shape[-1]
+            aligned = torch.cat([aligned, torch.zeros(channels, pad_len)], dim=1)
 
     return aligned
 
@@ -144,12 +169,13 @@ def fix_data_alignment(data_dir, backup=True, threshold_ms=1.0):
 
         # Align mastered audio to match unmastered
         # We align the mastered (post) to the unmastered (pre) as reference
-        m_audio_aligned = align_audio(m_audio, offset_samples)
+        # CRITICAL: Preserve unmastered length exactly
+        target_length = um_audio.shape[-1]
+        m_audio_aligned = align_audio(m_audio, offset_samples, target_length=target_length)
 
-        # Ensure same length after alignment
-        min_len = min(um_audio.shape[-1], m_audio_aligned.shape[-1])
-        um_audio = um_audio[:, :min_len]
-        m_audio_aligned = m_audio_aligned[:, :min_len]
+        # Verify length match
+        assert m_audio_aligned.shape[-1] == um_audio.shape[-1], \
+            f"Length mismatch after alignment: {m_audio_aligned.shape[-1]} vs {um_audio.shape[-1]}"
 
         # Save aligned mastered file
         torchaudio.save(str(m_file), m_audio_aligned, um_sr)
