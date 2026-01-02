@@ -73,13 +73,7 @@ def test_model(config_path, checkpoint_path):
         print(f"Checkpoint val loss: unknown")
 
     # Setup loss
-    loss_fn = CombinedLoss(
-        spectral_weight=config['training']['loss_weights']['spectral'],
-        perceptual_weight=config['training']['loss_weights']['perceptual'],
-        loudness_weight=config['training']['loss_weights']['loudness'],
-        param_reg_weight=config['training']['loss_weights'].get('param_reg', 0.0),
-        sample_rate=config['data']['sample_rate']
-    ).to(device)
+    loss_fn = CombinedLoss(config).to(device)
 
     # Test
     print("\n" + "=" * 70)
