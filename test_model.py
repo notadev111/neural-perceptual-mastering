@@ -66,7 +66,11 @@ def test_model(config_path, checkpoint_path):
 
     # Print checkpoint info
     print(f"Checkpoint epoch: {checkpoint.get('epoch', 'unknown')}")
-    print(f"Checkpoint val loss: {checkpoint.get('val_loss', 'unknown'):.4f}")
+    val_loss = checkpoint.get('val_loss', None)
+    if val_loss is not None:
+        print(f"Checkpoint val loss: {val_loss:.4f}")
+    else:
+        print(f"Checkpoint val loss: unknown")
 
     # Setup loss
     loss_fn = CombinedLoss(
